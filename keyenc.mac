@@ -1,0 +1,1802 @@
+; FM-7 keyboard encoder for ND80 version 1.0
+; Copyright (C) 2018-2019 by odaman68000. All rights reserved.
+
+	.z80
+
+;CPM	equ	0
+
+ifdef CPM
+SYSTEM	equ	0005h
+FCB1	equ	005ch
+FCB2	equ	006ch
+DTA	equ	0080h
+CLDSTT	equ	0
+DATA	equ	2000h
+else
+;ND80 BIOS
+CLDSTT	equ	1033h	;Coldstart
+ADISP	equ	5206h	; A->Console
+NAMSET	equ	702dh	; SD I/O
+FILERD	equ	7030h	; SD I/O
+DIRRD	equ	7033h	; SD I/O
+NXCSRC	equ	7048h	; SD I/O
+DIRWR	equ	7138h	; SD I/O internal call
+NMSRC	equ	7267h	; SD I/O internal call
+FATWR	equ	748bh	; SD I/O internal call
+FILEWR	equ	74d5h	; SD I/O internal call
+;ND80 Workarea
+ZDIRMK	equ	0e9d7h	; SD I/O
+NMADRS	equ	0e9e2h	; SD I/O
+NWCLST	equ	0e9e4h	; SD I/O
+NXCLST	equ	0e9e8h	; SD I/O
+ASRCMK	equ	0e9ech	; SD I/O
+SADRS	equ	0e9f0h	; SD I/O
+FILSIZ	equ	0e9f2h	; SD I/O
+DATA	equ	9000h
+endif
+CADRS	equ	0f054h	; cursor address
+;ND80 I/O
+PPIA	equ	80h	;8255 PA
+PPIB	equ	81h	;8255 PB
+PPIC	equ	82h	;8255 PC
+PPIM	equ	83h	;8255 Mode
+VRMCTL	equ	0d0h
+PS2KEY	equ	0d4h
+
+LEDCNT	equ	20
+
+	cseg
+
+ifdef CPM
+	ld	sp,(SYSTEM+1)
+endif
+	jp	entry
+
+defkt:	defb	0
+waitc:	defb	14
+waite:	defb	32
+
+entry:	call	init
+start:	call	sync
+	ld	c,0fh
+	call	waitn
+	ld	a,0ffh
+kloop:	call	kproc
+	jr	c,kloop0
+	cp	0ech		;R-Windows
+	jp	z,mnumod	;if R-Win, goto menu mode!
+	cp	0fdh		;ScrlLock
+	jr	z,kloope	;if ScrlLock, exit!
+	ld	a,0ffh
+	jr	kloop
+kloop0:	ld	a,7fh
+	jr	kloop
+kloope:	ld	a,11111111b
+	out	(PPIA),a
+	ld	a,00000000b	;NEW(old:00000001b)
+	out	(PPIB),a	;LED off (PPIB#7)
+	ld	de,msgend
+	call	strout
+	jp	CLDSTT
+
+cmdlop:	ld	b,5
+cmdlo0:	ld	a,0ffh
+	push	bc
+	call	kproc
+	pop	bc
+	cp	0dh		;RETURN
+	jr	z,cmdlo1
+	cp	0f3h		;F3
+	jr	z,cmdlo1
+	jr	cmdlop
+cmdlo1:	djnz	cmdlo0
+	ret
+
+kproc:	call	sendk
+	ld	hl,cnt
+	dec	(hl)
+	jr	nz,kproc0
+	ld	(hl),LEDCNT
+	inc	hl
+	ld	a,(hl)
+	out	(PPIB),a	;blink LED (PPIB#7)
+	xor	80h
+	ld	(hl),a
+kproc0:	in	a,(PS2KEY)
+	or	a
+	jr	nz,kproc1
+	ld	a,(stpkey)
+	jr	kproc2
+; cursor mode check
+kproc1:	ld	b,a
+	ld	a,(stpkey)
+	or	a
+	ld	a,b
+	jr	z,kproc2
+; cursor on mode key re-assign
+	cp	0e1h		;Down
+	jr	z,kproc3
+	cp	0e2h		;Up
+	jr	z,kproc4
+	cp	0e3h		;Right
+	jr	z,kproc5
+	cp	0e4h		;Left
+	jr	z,kproc6
+kproc2:	or	a
+	call	nz,keyin
+	ret
+kproc3:	ld	a,'2'
+	jr	kproc2
+kproc4:	ld	a,'8'
+	jr	kproc2
+kproc5:	ld	a,'6'
+	jr	kproc2
+kproc6:	ld	a,'4'
+	jr	kproc2
+
+; Send keycode to PPIA
+;BRK: AF, BC, DE, HL
+sendk:	ld	bc,1000h
+	ld	e,0ffh
+	ld	hl,key
+sendk0:	and	(hl)
+	ld	(hl),e
+	out	(PPIA),a
+	call	waitn
+	ld	a,(waitc)
+sendk1:	dec	a
+	jr	nz,sendk1
+	inc	hl
+	inc	c
+	ld	a,0ffh
+	djnz	sendk0
+
+; wait 70us (for Z80 6MHz clock timing)
+	ld	a,(waite)
+	ld	b,a
+sendk2:	djnz	sendk2
+	ld	a,0ffh
+	out	(PPIA),a
+	ret
+
+;convert PS2KEY value to FM-77 keycode table.
+; IN: A=character code
+;OUT: CF is set if key value is break key.
+;BRK: BC, DE, HL
+keyin:	cp	0fch	;Break(F12)?
+	scf
+	ret	z
+	cp	'A'
+	jr	c,keyin0
+	cp	'Z'+1
+	jr	nc,keyin0
+	add	a,20h
+keyin0:	push	af
+	ld	b,a
+	ld	de,3
+	ld	hl,(keytbl)
+keyin1:	ld	a,(hl)
+	or	a
+	jr	z,keyin5
+	cp	b
+	jr	z,keyin2
+	add	hl,de
+	jr	keyin1
+keyin2:	inc	hl
+	ld	b,0
+	ld	c,(hl)	;offset
+	inc	hl
+	ld	a,(hl)	;bitcode
+	ld	hl,key
+	add	hl,bc
+keyin3:	and	(hl)
+	ld	(hl),a
+keyin4:	pop	af
+	or	a
+	ret
+
+; as shift key is also pressing
+keyin5:	inc	hl
+keyin6:	ld	a,(hl)
+	or	a
+	jr	z,keyin8
+	cp	b
+	jr	z,keyin7
+	add	hl,de
+	jr	keyin6
+keyin7:	inc	hl
+	ld	b,0
+	ld	c,(hl)	;offset
+	inc	hl
+	ld	a,(hl)	;bitcode
+	ld	hl,key
+	add	hl,bc
+	and	(hl)
+	ld	(hl),a
+	ld	hl,key+15
+	ld	a,11101111b	;Shift
+	jr	keyin3
+
+;as ctrl key is also pressing
+keyin8:	inc	hl
+keyin9:	ld	a,(hl)
+	or	a
+	jr	z,keyin4
+	cp	b
+	jr	z,keyina
+	add	hl,de
+	jr	keyin9
+keyina:	inc	hl
+	ld	b,0
+	ld	c,(hl)	;offset
+	inc	hl
+	ld	a,(hl)	;bitcode
+	ld	hl,key
+	add	hl,bc
+	and	(hl)
+	ld	(hl),a
+	ld	hl,key+15
+	ld	a,11110111b	;Ctrl
+	jr	keyin3
+
+; Wait bits.
+; IN: C=wait bits
+;BRK: AF
+waitn:	push	hl
+	ld	hl,0
+waitn0:	inc	hl
+	ld	a,h
+	or	l
+	jr	z,waitn1
+	in	a,(PPIC)
+	and	0fh
+	cp	c
+	jr	nz,waitn0
+	pop	hl
+	ret
+waitn1:	pop	hl
+	scf
+	ret
+
+; Skip bits.
+; IN: C=wait bits
+;OUT: A=new bits
+skipn:
+skipn0:	in	a,(PPIC)
+	and	0fh
+	cp	c
+	jr	z,skipn0
+	nop
+	nop
+	nop
+	in	a,(PPIC)
+	and	0fh
+	ret
+
+; IN: DE=string address (0 termination)
+;BRK: AF, DE
+strout:	ld	a,(de)
+	or	a
+	ret	z
+	call	chput
+	inc	de
+	jr	strout
+
+; IN: A=character code
+;BRK: AF
+chput:	push	bc
+	push	de
+	push	hl
+ifdef CPM
+	ld	c,2
+	ld	e,a
+	call	SYSTEM
+else
+	call	ADISP
+endif
+	pop	hl
+	pop	de
+	pop	bc
+	ret
+
+; Set 8255 PPI to PA=Out, PB=Out, PCH=In, PCL=In.
+init:	ld	hl,cnt
+	ld	(hl),LEDCNT
+	inc	hl
+	ld	(hl),10000000b
+	inc	hl
+	ld	(hl),0
+	inc	hl
+	ld	bc,15
+	ld	d,h
+	ld	e,l
+	inc	de
+	ld	(hl),0ffh
+	ldir
+; set default key table
+	ld	a,(defkt)
+	add	a,a
+	add	a,a
+	add	a,a
+	add	a,a
+	ld	l,a
+	ld	h,0
+	ld	de,ktbls
+	add	hl,de
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	ld	(keytbl),de
+ifdef CPM
+	ld	c,1ah		;SETDTA
+	ld	de,DTA
+	call	SYSTEM
+else
+	ld	a,0c9h
+	ld	(ADISP),a
+endif
+	ld	a,10001001b
+	out	(PPIM),a
+	ld	a,0ffh
+	out	(PPIA),a
+	ld	a,(led)
+	out	(PPIB),a	; LED ON
+	ld	de,msgttl
+	call	strout
+; wait while key is pressing.
+init0:	in	a,(PS2KEY)
+	or	a
+	jr	nz,init0
+	ret
+
+; Wait and check communication pass.
+sync:	ld	de,msgsy
+	call	strout
+sync0:	ld	c,0fh
+	call	waitn
+	ld	bc,0f00h
+sync1:	in	a,(PS2KEY)
+	cp	0fch		;BREAK(F12)
+	jr	z,synce
+	call	waitn
+	call	skipn
+	inc	c
+	cp	c
+	jr	nz,sync0
+	djnz	sync1
+	ld	de,msgok
+	call	strout
+	ret
+synce:	ld	de,msgabo
+	call	strout
+
+	ld	bc,100fh
+	ld	hl,work
+	call	waitn
+synce0:	call	skipn
+	ld	(hl),a
+	inc	hl
+	ld	c,a
+	djnz	synce0
+	jp	CLDSTT
+
+; Menu prompt
+mnumod:	ld	de,prompt
+	call	strout
+	call	wkey
+	call	mnulin
+	ld	hl,mnubuf
+	ld	d,h
+	ld	e,l
+mnumo0:	ld	a,(hl)
+	or	a
+	jr	z,mnumo2
+	cp	20h
+	jr	z,mnumo1
+	inc	hl
+	jr	mnumo0
+mnumo1:	ld	(hl),0
+	inc	hl
+	ld	a,(hl)
+	or	a
+	jr	z,mnumo2
+	cp	20h
+	jr	z,mnumo1
+mnumo2:	ex	de,hl
+	ld	a,(hl)
+; ?
+	cp	'?'
+	jr	z,mnumo3
+; QUIT
+	push	de
+	ld	de,quit
+	call	strcmp
+	pop	de
+	jp	z,start
+; SEND
+	push	de
+	ld	de,send
+	call	strcmp
+	pop	de
+	jp	z,sndfil
+; RECV
+	push	de
+	ld	de,recv
+	call	strcmp
+	pop	de
+	jp	z,rcvfil
+; TRNS
+	push	de
+	ld	de,trns
+	call	strcmp
+	pop	de
+	jp	z,trnfil
+ifdef CPM
+; TD77
+	push	de
+	ld	de,td77
+	call	strcmp
+	pop	de
+	jp	z,td7fil
+endif
+; CURSOR
+	push	de
+	ld	de,cursor
+	call	strcmp
+	pop	de
+	jp	z,curmod
+; KEYMAP
+	push	de
+	ld	de,keymap
+	call	strcmp
+	pop	de
+	jp	z,keymod
+; HELP
+	push	de
+	ld	de,help
+	call	strcmp
+	pop	de
+	jr	nz,mnuerr
+mnumo3:	ld	de,msghlp
+	call	strout
+	jp	mnumod
+; COMMAND ERROR
+mnuerr:	ld	de,msgecm
+	call	strout
+	jp	mnumod
+
+ifdef CPM
+;Prepaire for reading file.
+; IN: DE=filename
+;OUT: ZF is set if file exists.
+;BRK: AF, BC, DE, HL
+fopen:	push	de
+	ld	bc,35
+	ld	de,FCB1+1
+	ld	hl,FCB1
+	ld	(hl),0
+	ldir
+	pop	de
+	ld	hl,FCB1
+	call	setfcb
+fopen0:	ld	c,0fh		;OPEN
+	ld	de,FCB1
+	call	SYSTEM
+	inc	a
+	jr	z,fopen1
+	ld	a,1
+fopen1:	dec	a
+	ret
+
+fread:	ld	bc,0
+fread0:	push	bc
+	push	hl
+	ld	c,14h		;READ
+	ld	de,FCB1
+	call	SYSTEM
+	pop	de
+	ld	bc,128
+	ld	hl,DTA
+	ldir
+	ex	de,hl
+	pop	bc
+	or	a
+	jr	nz,fread1
+	inc	bc
+	jr	fread0
+fread1:	push	bc
+	ld	c,10h		;CLOSE
+	ld	de,FCB1
+	call	SYSTEM
+	pop	bc
+	ld	de,128
+	ld	hl,0
+fread2:	ld	a,b
+	or	c
+	ret	z
+	add	hl,de
+	dec	bc
+	jr	fread2
+
+fdel:	ld	c,16h		;CREATE
+	ld	de,FCB1
+	call	SYSTEM
+	jr	fopen0
+
+fwrite:	ld	a,d
+	or	e
+	ret	z
+	push	de
+	ld	bc,128
+	ld	de,DTA
+	ldir
+	push	hl
+	ld	c,15h		;WRITE
+	ld	de,FCB1
+	call	SYSTEM
+	pop	de
+	pop	hl
+	or	a
+	jr	nz,fwrit1
+	ld	bc,128
+	sbc	hl,bc
+	jr	nc,fwrit0
+	ld	hl,0
+fwrit0:	ex	de,hl
+	jr	fwrite
+fwrit1:	scf
+	ret
+
+; IN: DE=filename, HL=FCB
+setfcb:	ld	(hl),0
+	inc	hl
+	ld	b,8
+setfc0:	ld	a,(de)
+	cp	21h
+	jr	c,setfc2
+	inc	de
+	cp	'.'
+	jr	z,setfc2
+	cp	'a'
+	jr	c,setfc1
+	cp	'z'+1
+	jr	nc,setfc1
+	sub	20h
+setfc1:	ld	(hl),a
+	inc	hl
+	djnz	setfc0
+setfc2:	ld	a,b
+	or	a
+	jr	z,setfc4
+setfc3:	ld	(hl),' '
+	inc	hl
+	djnz	setfc3
+setfc4:	ld	b,3
+setfc5:	ld	a,(de)
+	cp	21h
+	jr	c,setfc7
+	cp	'a'
+	jr	c,setfc6
+	cp	'z'+1
+	jr	nc,setfc6
+	sub	20h
+setfc6:	ld	(hl),a
+	inc	de
+	inc	hl
+	djnz	setfc5
+setfc7:	ld	a,b
+	or	a
+	ret	z
+setfc8:	ld	(hl),' '
+	inc	hl
+	djnz	setfc8
+	ret
+
+else
+
+;Prepaire for reading file.
+; IN: DE=filename
+;OUT: ZF is set if file exists.
+;BRK: AF, BC, DE, HL
+fopen:	call	NAMSET
+	xor	a
+	ld	(ZDIRMK),a
+	ld	(ASRCMK),a
+	call	NMSRC
+	ret
+
+fread:	ld	(SADRS),hl
+	call	FILERD
+	ld	hl,(FILSIZ)
+	ret
+
+; remove file
+; IN: NMBF=filename
+fdel:	ld	hl,(NMADRS)
+; write $e5 to file structure
+	ld	(hl),0e5h
+	call	DIRWR
+; free used clusters
+fdel0:	ld	hl,(NWCLST)
+	call	NXCSRC
+	xor	a
+	ld	(hl),a
+	inc	hl
+	ld	(hl),a
+	call	FATWR
+	ld	hl,(NXCLST)
+	ld	(NWCLST),hl
+	inc	hl
+	ld	a,h
+	or	l
+	jr	nz,fdel0
+	ret
+
+fwrite:	ld	(SADRS),hl
+	ld	(FILSIZ),de
+	jp	FILEWR
+
+endif
+
+fnf:	ld	de,msgfnf
+	call	strout
+	jp	mnumod
+
+sndfil:	ld	a,(de)
+	or	a
+	jp	z,mnuerr
+	call	fopen
+	jr	nz,fnf
+	ld	de,msgld
+	call	strout
+	ld	hl,DATA
+	call	fread
+	push	hl
+
+	call	decout
+	ld	de,msgsnd
+	call	strout
+	call	sync
+	ld	hl,DATA-1
+	pop	de
+	ld	(hl),0
+	ld	c,0fh
+	call	waitn
+sndlop:	ld	a,d
+	or	e
+	jr	z,sndlo4
+	inc	hl
+	dec	de
+	ld	a,(hl)
+	cp	0ah
+	jr	z,sndlo0
+	cp	1ah
+	jr	z,sndlo4
+	cp	20h
+	jr	nc,sndlo1
+	jr	sndlop
+sndlo0:	ld	a,0dh
+sndlo1:	ld	b,5
+sndlo2:	exx
+	push	af
+	ld	a,0ffh
+	call	sendk
+	ld	hl,cnt+1
+	ld	a,(hl)
+	out	(PPIB),a	;blink LED (PPIB#7)
+	xor	10000000b
+	ld	(hl),a
+	pop	af
+	push	af
+	call	keyin
+	pop	af
+	exx
+	djnz	sndlo2
+	ld	b,5
+sndlo3:	exx
+	push	af
+	ld	a,0ffh
+	call	sendk
+	pop	af
+	exx
+	djnz	sndlo3
+	cp	0dh
+	jr	nz,sndlop
+sndlow:	ex	(sp),hl
+	ex	(sp),hl
+	ex	(sp),hl
+	ex	(sp),hl
+	djnz	sndlow
+	jr	sndlop
+
+sndlo4:	ld	de,msgcmp
+	call	strout
+	jp	mnumod
+
+rcvfil:	ld	a,(de)
+	or	a
+	jp	z,mnuerr
+	push	de
+	ld	de,msgrvp
+	call	strout
+	call	cmdlop
+	ld	de,msgrvs
+	call	strout
+	di
+	call	rcvw
+	jr	c,rcvfi2
+	ex	de,hl	;DE=bottom
+	call	rcvw	;HL=high
+	jr	c,rcvfi2
+	or	a
+	sbc	hl,de
+	inc	hl
+	ld	(fsize),hl
+	ex	de,hl
+	ld	hl,DATA
+rcvfi0:	call	rcvb
+	jr	c,rcvfi2
+	ld	(hl),c
+	inc	hl
+	dec	de
+	ld	a,d
+	or	e
+	jr	nz,rcvfi0
+	ei
+	ld	hl,(fsize)
+	call	decout
+	ld	de,msgrcv
+	call	strout
+
+	pop	de
+	call	fopen
+	call	z,fdel		; remove file if exists
+	ld	hl,DATA
+	ld	de,(fsize)
+	call	fwrite
+	ld	de,msgcmp
+rcvfi1:	call	strout
+	jp	mnumod
+rcvfi2:	ei
+	ld	de,msgbrk
+	jr	rcvfi1
+
+rcvw:	call	rcvb
+	ret	c
+	ld	h,c
+	call	rcvb
+	ret	c
+	ld	l,c
+	ret
+
+rcvb:	in	a,(PS2KEY)
+	cp	0fch		;BREAK?
+	jr	z,rcvb2
+	in	a,(PPIC)
+	rlca
+	jr	nc,rcvb		;wait STOP bit (high)
+rcvb0:	in	a,(PS2KEY)
+	cp	0fch		;BREAK?
+	jr	z,rcvb2
+	in	a,(PPIC)
+	rlca
+	jr	c,rcvb0		;wait START bit (low)
+	ld	b,8
+	call	w833us
+	call	w200us
+rcvb1:	in	a,(PPIC)
+	rlca
+	rr	c
+	call	w833us
+	djnz	rcvb1
+	or	a
+	ret
+rcvb2:	scf
+	ret
+
+trnfil:	ld	a,(de)
+	or	a
+	jp	z,mnuerr
+	call	fopen
+	jp	nz,fnf
+	ld	de,msgld
+	call	strout
+	ld	hl,DATA
+	call	fread
+	push	hl
+	push	hl
+	call	decout
+	ld	de,msgtrn
+	call	strout
+
+	pop	hl		; HL=FILSIZ
+	ld	de,DATA		; DE=DATA
+	add	hl,de
+	dec	hl		; HL=high
+	ex	de,hl		; HL=DATA, DE=high
+	di
+	call	trnw		; bottom
+	ex	de,hl
+	call	trnw		; high
+	ex	de,hl		; HL=DATA
+	pop	de		; DE=FILSIZ
+trnfi1:	in	a,(PS2KEY)
+	cp	0fch		;BREAK?
+	jr	z,trnfi3
+	ld	c,(hl)
+	call	trnb
+	inc	hl
+	dec	de
+	ld	a,d
+	or	e
+	jr	nz,trnfi1
+	ld	de,msgcmp
+trnfi2:	ei
+	call	strout
+	jp	mnumod
+trnfi3:	ld	de,msgbrk
+	jr	trnfi2
+
+trnw:	ld	c,h
+	call	trnb
+	ld	c,l
+trnb:	ld	a,00000001b
+	out	(PPIB),a
+	call	w833us		;send STOP bit
+	xor	a
+	out	(PPIB),a
+	call	w833us		;send START bit
+	ld	a,c
+	ld	b,8
+trnb0:	out	(PPIB),a
+	rrca
+	call	w833us
+	djnz	trnb0
+	ld	a,(led)		;NEW
+	out	(PPIB),a	;NEW
+	ret
+
+ifdef CPM
+; IN: DE=filename
+;OUT: CF is set if file not found.
+bopen:	ld	hl,DTA+128
+	ld	(bpoint),hl
+	push	de
+	ld	bc,35
+	ld	de,FCB1+1
+	ld	hl,FCB1
+	ld	(hl),0
+	ldir
+	pop	de
+	ld	hl,FCB1
+	call	setfcb
+	ld	c,0fh		; OPEN
+	ld	de,FCB1
+	call	SYSTEM
+	inc	a
+	scf
+	ret	z
+	or	a
+	ret
+
+;OUT: A=data, CF is set if EOF.
+bread:	ld	hl,(bpoint)
+	ld	a,h
+	or	a
+	jr	z,bread0
+	ld	c,14h		; READ
+	ld	de,FCB1
+	call	SYSTEM
+	or	a
+	scf
+	ret	nz
+	ld	hl,DTA
+bread0:	ld	a,(hl)
+	inc	hl
+	ld	(bpoint),hl
+	or	a
+	ret
+
+bhder:	ld	bc,02b0h
+bhder0:	ld	a,b
+	or	c
+	ret	z
+	push	bc
+	call	bread
+	pop	bc
+	ret	c
+	dec	bc
+	jr	bhder0
+
+trkinf:	ld	de,td7trk
+	call	strout
+	ld	a,(DATA)
+	ld	h,0
+	ld	l,a
+	call	decout
+	ld	a,','
+	call	chput
+	ld	a,' '
+	call	chput
+	ld	hl,(DATA+14)
+	call	decout
+	ld	de,td7byt
+	call	strout
+	ret
+
+wait10:	in	a,(PS2KEY)
+	cp	0fch		;F12?
+	scf
+	ret	z
+	in	a,(PPIC)
+	rla
+	jr	nc,wait10	;wait while low
+wait0:	in	a,(PS2KEY)
+	cp	0fch		;F12?
+	scf
+	ret	z
+	in	a,(PPIC)
+	rla
+	jr	c,wait0		;wait while high
+	or	a
+	ret
+
+secrd:	ld	hl,DATA
+	ld	b,16
+secrd0:	push	bc
+	push	hl
+	call	bread
+	pop	hl
+	pop	bc
+	ret	c
+	ld	(hl),a
+	inc	hl
+	djnz	secrd0
+	ld	bc,(DATA+14)
+	ld	a,b
+	or	c
+	jr	z,secrd
+secrd1:	ld	a,b
+	or	c
+	ret	z
+	push	bc
+	push	hl
+	call	bread
+	pop	hl
+	pop	bc
+	ret	c
+	ld	(hl),a
+	inc	hl
+	dec	bc
+	jr	secrd1
+
+secsnd:	ld	hl,DATA
+	ld	d,16
+secsn0:	ld	c,(hl)
+	call	trnb
+	inc	hl
+	dec	d
+	jr	nz,secsn0
+	ld	de,(DATA+14)
+secsn1:	ld	a,d
+	or	e
+	ret	z
+	ld	c,(hl)
+	call	trnb
+	inc	hl
+	dec	de
+	jr	secsn1
+
+td7fil:	ld	a,(de)
+	or	a
+	jp	z,mnuerr
+	call	bopen
+	jp	c,fnf
+	call	bhder
+	jr	c,td7fi4
+td7fi0:	call	secrd
+	jr	c,td7fi1
+	call	trkinf
+	call	secsnd
+	call	wait10
+	jr	c,td7fi3
+	ld	de,td7snt
+	call	strout
+	jr	td7fi0
+td7fi1:	ld	a,0ffh
+	call	trnb
+	ld	de,msgcmp
+td7fi2:	call	strout
+	jp	mnumod
+td7fi3:	ld	de,td7abo
+	jr	td7fi2
+td7fi4:	ld	de,td7fmr
+	jr	td7fi2
+endif
+
+curmod:	ld	a,(de)
+	cp	'0'
+	ld	a,0		;"xor a" cannot be used in here
+	jr	z,curmo0
+	ld	a,'5'
+curmo0:	ld	(stpkey),a
+	ld	de,msgstp
+	call	strout
+	jp	mnumod
+
+keymod:	ld	hl,ktbls
+	ld	a,(de)
+	or	a
+	jr	z,keymo7
+	cp	'?'
+	jr	z,keymo7
+keymo0:	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)
+	inc	hl
+	ld	a,c
+	or	b
+	jr	z,keymo6
+	push	de
+	push	hl
+	ex	de,hl
+	call	strcmp
+	pop	hl
+	pop	de
+	jr	z,keymo1
+	ld	bc,14
+	add	hl,bc
+	jr	keymo0
+keymo1:	ld	(keytbl),bc
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ex	de,hl
+	push	de
+	ld	de,msgkms
+	call	strout
+	pop	de
+keymo2:	call	strout
+	call	mnuret
+	jp	mnumod
+keymo6:	ld	de,msgknf
+	jr	keymo2
+keymo7:	ld	c,(hl)
+	inc	hl
+	ld	b,(hl)
+	ld	a,b
+	or	c
+	jp	z,mnumod
+	inc	hl
+	ld	a,(keytbl)
+	cp	c
+	jr	nz,keymo8
+	ld	a,(keytbl+1)
+	cp	b
+	jr	nz,keymo8
+	ld	a,'*'
+	jr	keymo9
+keymo8:	ld	a,' '
+keymo9:	call	chput
+	ex	de,hl
+	call	strout
+	inc	de
+	ld	a,' '
+	call	chput
+	ld	a,':'
+	call	chput
+	ld	a,' '
+	call	chput
+	call	strout
+	inc	de
+	call	mnuret
+	ex	de,hl
+	jr	keymo7
+
+mnulin:	ld	b,0
+	ld	hl,mnubuf
+	ld	(hl),b
+mnulop:	call	inkey
+	ld	a,c
+	cp	08h	;BS
+	jr	z,mnubs
+	cp	0dh	;RET
+	jr	z,mnuret
+	cp	1bh	;ESC
+	jr	z,mnuesc
+	cp	0fch	;BREAK(F12)
+	jr	z,mnuesc
+	cp	0e5h	;HOME
+	call	z,mnuera
+	cp	20h
+	jr	c,mnulop
+	cp	7fh
+	jr	nc,mnulop
+mnulo0:	ld	a,b
+	cp	40
+	jr	nc,mnulop
+	inc	b
+	ld	(hl),c
+	inc	hl
+	ld	(hl),0
+	ld	a,c
+	call	chput
+	jr	mnulop
+mnubs:	call	dobs
+	jr	mnulop
+mnuesc:	call	mnuera
+	ld	de,quit
+mnues0:	ld	a,(de)
+	or	a
+	jr	z,mnuret
+	ld	(hl),a
+	inc	de
+	inc	hl
+	ld	(hl),0
+	call	chput
+	jr	mnues0
+mnuera:	call	dobs
+	jr	nz,mnuera
+	xor	a
+	ret
+mnuret:	ld	a,0dh
+	call	chput
+	ld	a,0ah
+	call	chput
+	ret
+dobs:	ld	a,b
+	or	a
+	ret	z
+	ld	(hl),0
+	dec	hl
+	ex	de,hl
+	ld	hl,(CADRS)
+	dec	hl
+	ld	a,11111011b
+	out	(VRMCTL),a
+	ld	(hl),0
+	ld	a,11111100b
+	out	(VRMCTL),a
+	ld	(CADRS),hl
+	ex	de,hl
+	dec	b
+	ret
+
+inkey:	in	a,(PS2KEY)
+	or	a
+	jr	z,inkey
+	ld	c,a
+wkey:	in	a,(PS2KEY)
+	or	a
+	jr	nz,wkey
+	ret
+
+strcmp:	push	hl
+	ex	de,hl
+strcm0:	ld	a,(de)
+	cp	'A'
+	jr	c,strcm1
+	cp	'Z'+1
+	jr	nc,strcm1
+	add	a,20h
+strcm1:	cp	(hl)
+	jr	nz,strcm2
+	or	a
+	jr	z,strcm2
+	inc	de
+	inc	hl
+	jr	strcm0
+strcm2:	pop	hl
+	ret
+
+decout:	xor	a
+	ld	(work),a
+	ld	de,10000
+	call	prtcnt
+	ld	de,1000
+	call	prtcnt
+	ld	de,100
+	call	prtcnt
+	ld	de,10
+	call	prtcnt
+	ld	a,l
+	add	a,'0'
+	call	chput
+	ret
+prtcnt:	call	cntde
+	ld	b,a
+	ld	a,(work)
+	or	a
+	ld	a,b
+	jr	nz,prtcn0
+	or	a
+	ret	z
+prtcn0:	add	a,'0'
+	ld	(work),a
+	jp	chput
+cntde:	xor	a
+cntde0:	sbc	hl,de
+	jr	c,cntde1
+	inc	a
+	jr	cntde0
+cntde1:	add	hl,de
+	ret
+
+w200us:	push	bc
+	ld	b,60
+	jr	w833u0
+w833us:	push	bc
+	ld	b,238
+w833u0:	nop
+	nop
+	djnz	w833u0
+	pop	bc
+	ret
+
+keytb1:
+; *** #0 ***
+	db	01bh,00h,11111110b	;ESC
+	db	0f1h,01h,11111110b	;PF1
+	db	0f2h,02h,11111110b	;PF2
+	db	0f3h,03h,11111110b	;PF3
+	db	0f4h,04h,11111110b	;PF4
+	db	0f5h,05h,11111110b	;PF5
+	db	0f6h,06h,11111110b	;PF6
+	db	0f7h,07h,11111110b	;PF7
+	db	0f8h,08h,11111110b	;PF8
+	db	0f9h,09h,11111110b	;PF9
+	db	0fah,0ah,11111110b	;PF10
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #1 ***
+	db	'1',00h,11111101b
+	db	'2',01h,11111101b
+	db	'3',02h,11111101b
+	db	'4',03h,11111101b
+	db	'5',04h,11111101b
+	db	'6',05h,11111101b
+	db	'7',06h,11111101b
+	db	'8',07h,11111101b
+	db	'9',08h,11111101b
+	db	'0',09h,11111101b
+	db	'-',0ah,11111101b
+	db	'^',0bh,11111101b
+	db	'\',0ch,11111101b
+	db	0e7h,0dh,11111101b	;INS(Ins)
+	db	0e6h,0eh,11111101b	;CLS(End)
+	;0fh
+; *** #2 ***
+	db	'q',00h,11111011b
+	db	'w',01h,11111011b
+	db	'e',02h,11111011b
+	db	'r',03h,11111011b
+	db	't',04h,11111011b
+	db	'y',05h,11111011b
+	db	'u',06h,11111011b
+	db	'i',07h,11111011b
+	db	'o',08h,11111011b
+	db	'p',09h,11111011b
+	db	'@',0ah,11111011b
+	db	'[',0bh,11111011b
+	db	08h,0ch,11111011b	;BS
+	db	0e9h,0dh,11111011b	;EL(PgUp)
+	db	0ebh,0eh,11111011b	;DUP(PgDown)
+	db	0f0h,0fh,11111011b	;CAP(Caps)
+; *** #3 ***
+	db	'a',00h,11110111b
+	db	's',01h,11110111b
+	db	'd',02h,11110111b
+	db	'f',03h,11110111b
+	db	'g',04h,11110111b
+	db	'h',05h,11110111b
+	db	'j',06h,11110111b
+	db	'k',07h,11110111b
+	db	'l',08h,11110111b
+	db	';',09h,11110111b
+	db	':',0ah,11110111b
+	db	']',0bh,11110111b
+	db	0dh,0ch,11110111b	;ENTER
+	db	0e8h,0dh,11110111b	;DEL(Del)
+	db	0e5h,0eh,11110111b	;HOME(Home)
+	;db	0ffh,0fh,11110111b	;CTRL
+; *** #4 ***
+	db	'z',00h,11101111b
+	db	'x',01h,11101111b
+	db	'c',02h,11101111b
+	db	'v',03h,11101111b
+	db	'b',04h,11101111b
+	db	'n',05h,11101111b
+	db	'm',06h,11101111b
+	db	',',07h,11101111b
+	db	'.',08h,11101111b
+	db	'/',09h,11101111b
+	db	22h,0ah,11101111b	;D-Quot
+	;0bh
+	;0ch
+	db	0e2h,0dh,11101111b	;UP
+	db	0e1h,0eh,11101111b	;DOWN
+	;db	0ffh,0fh,11101111b	;Shift
+; *** #5 ***
+	db	09h,00h,11011111b	;TAB
+	;01h
+	;02h
+	;03h
+	db	' ',04h,11011111b	;SPACE
+	db	'=',05h,11011111b	;(TENKEY)
+	;06h 9 (TENKEY)
+	;07h 8 (TENKEY)
+	;08h 7 (TENKEY)
+	;09h 4 (TENKEY)
+	;0ah 5 (TENKEY)
+	;0bh 6 (TENKEY)
+	;0ch , (TENKEY)
+	db	0e4h,0dh,11011111b	;LEFT
+	db	0e3h,0eh,11011111b	;RIGHT
+	db	0edh,0fh,11011111b	;GRAPH(muhenkan)
+; *** #6 ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h - (TENKEY)
+	db	'+',06h,10111111b	;(TENKEY)
+	;07h / (TENKEY)
+	db	'*',08h,10111111b	;(TENKEY)
+	;09h 1 (TENKEY)
+	;0ah 2 (TENKEY)
+	;0bh 3 (TENKEY)
+	;0ch ENTER (TENKEY)
+	;0dh 0 (TENKEY)
+	;0eh . (TENKEY)
+	db	0efh,0fh,10111111b	;KANA(kana)
+; *** End of Table ***
+	db	00h
+
+; *** #1 (+SHIFT) ***
+	db	'!',00h,11111101b
+	; 01h
+	db	'#',02h,11111101b
+	db	'$',03h,11111101b
+	db	'%',04h,11111101b
+	db	'&',05h,11111101b
+	db	27h,06h,11111101b	;S-Quot
+	db	'(',07h,11111101b
+	db	')',08h,11111101b
+	;09h
+	;0ah
+	db	'~',0bh,11111101b
+	db	'|',0ch,11111101b
+	;0dh
+	;0eh
+	;0fh
+; *** #2 (+SHIFT) ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h
+	;06h
+	;07h
+	;08h
+	;09h
+	db	'`',0ah,11111011b
+	db	'{',0bh,11111011b
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #3 (+SHIFT) ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h
+	;06h
+	;07h
+	;08h
+	;09h
+	;0ah
+	db	'}',0bh,11110111b
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #4 (+SHIFT) ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h
+	;06h
+	db	'<',07h,11101111b
+	db	'>',08h,11101111b
+	db	'?',09h,11101111b
+	db	'_',0ah,11101111b
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** End of Table ***
+	db	00h
+
+; *** #2 (+CTRL) ***
+	db	11h,00h,11111011b	;q
+	db	17h,01h,11111011b	;w
+	db	05h,02h,11111011b	;e
+	db	12h,03h,11111011b	;r
+	db	14h,04h,11111011b	;t
+	db	19h,05h,11111011b	;y
+	db	15h,06h,11111011b	;u
+	db	09h,07h,11111011b	;i
+	db	0fh,08h,11111011b	;o
+	db	10h,09h,11111011b	;p
+	;0ah
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #3 (+CTRL) ***
+	db	01h,00h,11110111b	;a
+	db	13h,01h,11110111b	;s
+	db	04h,02h,11110111b	;d
+	db	06h,03h,11110111b	;f
+	db	07h,04h,11110111b	;g
+	db	08h,05h,11110111b	;h
+	db	0ah,06h,11110111b	;j
+	db	0bh,07h,11110111b	;k
+	db	0ch,08h,11110111b	;l
+	;09h
+	;0ah
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;db	0ffh,0fh,11110111b	;CTRL
+; *** #4 (+CTRL) ***
+	db	1ah,00h,11101111b	;z
+	db	18h,01h,11101111b	;x
+	db	03h,02h,11101111b	;c
+	db	16h,03h,11101111b	;v
+	db	02h,04h,11101111b	;b
+	db	0eh,05h,11101111b	;n
+	db	0dh,06h,11101111b	;m
+	;07h
+	;08h
+	;09h
+	;0ah
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** End of Table ***
+	db	00h
+
+keytb2:
+; *** #0 ***
+	db	01bh,00h,11111110b	;ESC
+	db	0f1h,01h,11111110b	;PF1
+	db	0f2h,02h,11111110b	;PF2
+	db	0f3h,03h,11111110b	;PF3
+	db	0f4h,04h,11111110b	;PF4
+	db	0f5h,05h,11111110b	;PF5
+	db	0f6h,06h,11111110b	;PF6
+	db	0f7h,07h,11111110b	;PF7
+	db	0f8h,08h,11111110b	;PF8
+	db	0f9h,09h,11111110b	;PF9
+	db	0fah,0ah,11111110b	;PF10
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #1 ***
+	db	'1',00h,11111101b
+	db	'2',01h,11111101b
+	db	'3',02h,11111101b
+	db	'4',03h,11111101b
+	db	'5',04h,11111101b
+	db	'6',05h,11111101b
+	db	'7',06h,11111101b
+	db	'8',07h,11111101b
+	db	'9',08h,11111101b
+	db	'0',09h,11111101b
+	db	'-',0ah,11111101b
+	db	'^',0bh,11111101b
+	db	'\',0ch,11111101b
+	db	0e7h,0dh,11111101b	;INS(Ins)
+	db	0e6h,0eh,11111101b	;CLS(End)
+	;0fh
+; *** #2 ***
+	db	'q',00h,11111011b
+	db	'w',01h,11111011b
+	db	'e',02h,11111011b
+	db	'r',03h,11111011b
+	db	't',04h,11111011b
+	db	'y',05h,11111011b
+	db	'u',06h,11111011b
+	db	'i',07h,11111011b
+	db	'o',08h,11111011b
+	db	'p',09h,11111011b
+	db	'@',0ah,11111011b
+	db	'[',0bh,11111011b
+	db	08h,0ch,11111011b	;BS
+	db	0e9h,0dh,11111011b	;EL(PgUp)
+	db	0ebh,0eh,11111011b	;DUP(PgDown)
+	db	0f0h,0fh,11111011b	;CAP(Caps)
+; *** #3 ***
+	db	'a',00h,11110111b
+	db	's',01h,11110111b
+	db	'd',02h,11110111b
+	db	'f',03h,11110111b
+	db	'g',04h,11110111b
+	db	'h',05h,11110111b
+	db	'j',06h,11110111b
+	db	'k',07h,11110111b
+	db	'l',08h,11110111b
+	db	';',09h,11110111b
+	db	':',0ah,11110111b
+	db	']',0bh,11110111b
+	db	0dh,0ch,11110111b	;ENTER
+	db	0e8h,0dh,11110111b	;DEL(Del)
+	db	0e5h,0eh,11110111b	;HOME(Home)
+	;db	0ffh,0fh,11110111b	;CTRL
+; *** #4 ***
+	db	'z',00h,11101111b
+	db	'x',01h,11101111b
+	db	'c',02h,11101111b
+	db	'v',03h,11101111b
+	db	'b',04h,11101111b
+	db	'n',05h,11101111b
+	db	'm',06h,11101111b
+	db	',',07h,11101111b
+	db	'.',08h,11101111b
+	db	'/',09h,11101111b
+	db	22h,0ah,11101111b	;D-Quot
+	;0bh
+	;0ch
+	db	0e2h,0dh,11101111b	;UP
+	db	0e1h,0eh,11101111b	;DOWN
+	;db	0ffh,0fh,11101111b	;Shift
+; *** #5 ***
+	db	09h,00h,11011111b	;TAB
+	;01h
+	;02h
+	;03h
+	db	' ',04h,11011111b	;SPACE
+	db	'=',05h,11011111b	;(TENKEY)
+	;06h 9 (TENKEY)
+	;07h 8 (TENKEY)
+	;08h 7 (TENKEY)
+	;09h 4 (TENKEY)
+	;0ah 5 (TENKEY)
+	;0bh 6 (TENKEY)
+	;0ch , (TENKEY)
+	db	0e4h,0dh,11011111b	;LEFT
+	db	0e3h,0eh,11011111b	;RIGHT
+	db	0edh,0fh,11011111b	;GRAPH(muhenkan)
+; *** #6 ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h - (TENKEY)
+	db	'+',06h,10111111b	;(TENKEY)
+	;07h / (TENKEY)
+	db	'*',08h,10111111b	;(TENKEY)
+	;09h 1 (TENKEY)
+	;0ah 2 (TENKEY)
+	;0bh 3 (TENKEY)
+	;0ch ENTER (TENKEY)
+	;0dh 0 (TENKEY)
+	;0eh . (TENKEY)
+	db	0efh,0fh,10111111b	;KANA(kana)
+; *** End of Table ***
+	db	00h
+
+; *** #1 (+SHIFT) ***
+	db	'!',00h,11111101b
+	; 01h
+	db	'#',02h,11111101b
+	db	'$',03h,11111101b
+	db	'%',04h,11111101b
+	db	'&',05h,11111101b
+	db	27h,06h,11111101b	;S-Quot
+	db	'(',07h,11111101b
+	db	')',08h,11111101b
+	;09h
+	;0ah
+	db	'~',0bh,11111101b
+	db	'|',0ch,11111101b
+	;0dh
+	;0eh
+	;0fh
+; *** #2 (+SHIFT) ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h
+	;06h
+	;07h
+	;08h
+	;09h
+	db	'`',0ah,11111011b
+	db	'{',0bh,11111011b
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #3 (+SHIFT) ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h
+	;06h
+	;07h
+	;08h
+	;09h
+	;0ah
+	db	'}',0bh,11110111b
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #4 (+SHIFT) ***
+	;00h
+	;01h
+	;02h
+	;03h
+	;04h
+	;05h
+	;06h
+	db	'<',07h,11101111b
+	db	'>',08h,11101111b
+	db	'?',09h,11101111b
+	db	'_',0ah,11101111b
+	;0bh
+	;0ch
+	db	0bh,0dh,11101111b	;CTRL+K -> SHIFT+UP
+	db	01h,0eh,11101111b	;CTRL+A -> SHIFT+DOWN
+	;0fh
+; *** End of Table ***
+	db	00h
+
+; *** #2 (+CTRL) ***
+	db	11h,00h,11111011b	;q
+	db	17h,01h,11111011b	;w
+	db	05h,02h,11111011b	;e
+	db	12h,03h,11111011b	;r
+	db	14h,04h,11111011b	;t
+	db	19h,05h,11111011b	;y
+	db	15h,06h,11111011b	;u
+	db	09h,07h,11111011b	;i
+	db	0fh,08h,11111011b	;o
+	db	10h,09h,11111011b	;p
+	;0ah
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** #3 (+CTRL) ***
+	;db	01h,00h,11110111b	;a
+	db	13h,01h,11110111b	;s
+	db	04h,02h,11110111b	;d
+	db	06h,03h,11110111b	;f
+	db	07h,04h,11110111b	;g
+	db	08h,05h,11110111b	;h
+	db	0ah,06h,11110111b	;j
+	;db	0bh,07h,11110111b	;k
+	db	0ch,08h,11110111b	;l
+	;09h
+	;0ah
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;db	0ffh,0fh,11110111b	;CTRL
+; *** #4 (+CTRL) ***
+	db	1ah,00h,11101111b	;z
+	db	18h,01h,11101111b	;x
+	db	03h,02h,11101111b	;c
+	db	16h,03h,11101111b	;v
+	db	02h,04h,11101111b	;b
+	db	0eh,05h,11101111b	;n
+	db	0dh,06h,11101111b	;m
+	;07h
+	;08h
+	;09h
+	;0ah
+	;0bh
+	;0ch
+	;0dh
+	;0eh
+	;0fh
+; *** End of Table ***
+	db	00h
+
+ktbls:	dw	keytb1
+	db	'std',0,'Standard ',0
+	dw	keytb2
+	db	'os0',0,'for OS0  ',0
+	dw	0
+
+msgttl:	db	'FM-77 key matrix encoder version 1.0',0dh,0ah
+	db	'Copyright (C) 2018-2019 by OdaMan.',0dh,0ah
+	db	'    odaman68k.amiga@gmail.com',0dh,0ah
+	db	0dh,0ah,0
+msgsy:	db	'Syncing... (abort with F12)',0dh,0ah,0
+msgok:	db	'Connection OK.',0dh,0ah,0
+msgend:	db	'Disconnected.',0dh,0ah,0
+msgabo:	db	'Aborted. (or signal is not acceptable)',0dh,0ah,0
+
+prompt:	db	'KEYENC> ',0
+quit:	db	'quit',0
+send:	db	'send',0
+recv:	db	'recv',0
+trns:	db	'trns',0
+ifdef CPM
+td77:	db	'td77',0
+td7trk:	defb	'Track: #',0
+td7byt:	defb	' bytes',0
+td7snt:	defb	' - Transferred.',0dh,0ah,0
+td7abo:	defb	0dh,0ah,'Break!',0dh,0ah,0
+td7fmr:	defb	'File format is invalid.',0dh,0ah,0
+endif
+cursor:	db	'cursor',0
+keymap:	db	'keymap',0
+help:	db	'help',0
+msgld:	db	'Loading...',0dh,0ah,0
+msgsnd:	db	' bytes loaded, Sending... (can break with F12)',0dh,0ah,0
+msgtrn:	db	' bytes loaded, Transferring... (can break with F12)',0dh,0ah,0
+msgrvp:	db	'Type send command for FM-77...',0dh,0ah,0
+msgrvs:	db	'Receiving... (can break with F12)',0dh,0ah,0
+msgrcv:	db	' bytes received, Saving...',0dh,0ah,0
+msgcmp:	db	'Completed.',0dh,0ah,0
+msgbrk:	db	'Break!',0dh,0ah,0
+msgecm:	db	'Invalid command. Show help with "help" or "?".',0dh,0ah,0
+msgfnf:	db	'File not found.',0dh,0ah,0
+msgknf:	db	'Keymap not found.',0dh,0ah,0
+msgkms:	db	'Keymap was set as : ',0
+msgstp:	db	'Cursor mode setting was accepted.',0dh,0ah,0
+msghlp:	db	'KEYENC command mode help',0dh,0ah
+	db	'  quit            : quit the command mode.',0dh,0ah
+	db	'  cursor on|0     : cursor mode on, or off.',0dh,0ah
+	db	'  keymap [name]|? : set keymap.',0dh,0ah
+	db	'  send [filename] : read file and send it as like as key type.',0dh,0ah
+	db	'  trns [filename] : transfer file data via printer port to FM-77.',0dh,0ah
+	db	'  recv [filename] : receive data via printer port from FM-77 to file.',0dh,0ah
+ifdef CPM
+	db	'  td77 [filename] : transfer D77 disk image via printer port to FM-77.',0dh,0ah
+endif
+	db	0dh,0ah,0
+
+ifdef CPM
+bpoint:	defw	0
+endif
+keytbl:	dw	keytb1
+cnt:	db	LEDCNT
+led:	db	10000000b
+stpkey:	db	0
+key:	db	0ffh,0ffh,0ffh,0ffh,0ffh,0ffh,0ffh,0ffh
+	db	0ffh,0ffh,0ffh,0ffh,0ffh,0ffh,0ffh,0ffh
+fsize:	dw	0
+mnubuf:
+work	equ	mnubuf+40
+
+	end
